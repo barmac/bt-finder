@@ -3,7 +3,7 @@ import { DirectionEstimator } from './direction.js';
 import { DeviceRegistry, displayName } from './devices.js';
 import { estimateDistance, distanceLabel, rssiAt1m, rssiTrend, trendLabel, signalQuality, isValidRssi } from './signal.js';
 import { BluetoothSource, detectCapabilities, describeBluetoothError } from './bluetooth.js';
-import { NativeBluetoothSource, detectNativeCapabilities, isNativeApp, nativeBluetoothReady } from './native-bluetooth.js';
+import { NativeBluetoothSource, connectedDevices, detectNativeCapabilities, isNativeApp, nativeBluetoothReady } from './native-bluetooth.js';
 import { SimulatedSource } from './simulator.js';
 import { HeadingProvider } from './heading.js';
 import { Dial, drawSparkline } from './dial.js';
@@ -19,7 +19,7 @@ const FLAG_URL = 'chrome://flags/#enable-experimental-web-platform-features';
 const SETTINGS_KEY = 'bt-finder:settings';
 
 function loadSettings() {
-  const defaults = { namedOnly: false, calibration: {} };
+  const defaults = { namedOnly: false, connectedOnly: false, calibration: {} };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') };
   } catch {
@@ -50,6 +50,8 @@ const app = {
   bt: null,
   sim: null,
   remembered: new Map(), // id -> BluetoothDevice the site has permission for
+  connected: new Set(), // in the app: ids of devices connected to the iPhone
+  connectedAt: 0,
   selectedId: null,
   selectedAt: 0,
   lastGood: null, // last confident estimate { bearing, uncertainty, t }
@@ -146,6 +148,25 @@ async function refreshNativeCapabilities() {
     // Check again as soon as iOS answers (e.g. after the permission prompt).
     nativeBluetoothReady().then(refreshNativeCapabilities, refreshNativeCapabilities);
   }
+  refreshConnected();
+}
+
+/**
+ * In the app: list the devices connected to the iPhone, such as a watch.
+ * They usually stop advertising while connected, so a scan misses them.
+ */
+async function refreshConnected() {
+  if (!NATIVE || app.mode === 'demo' || !app.caps || app.caps.problem || app.caps.adapter === false) return;
+  app.connectedAt = performance.now();
+  try {
+    const devices = await connectedDevices();
+    if (app.mode === 'demo') return;
+    app.connected = new Set(devices.map((device) => device.id));
+    for (const device of devices) registry.touch({ ...device, source: 'connected' });
+  } catch (error) {
+    console.error('Could not list connected devices:', error);
+  }
+  requestListRender();
 }
 
 async function pickDevice() {
@@ -182,6 +203,7 @@ function startDemo() {
   heading.startCompass().then(updateCapabilityUi);
   app.bt?.stop();
   registry.clear();
+  app.connected = new Set();
   clearRows();
   app.sim = new SimulatedSource({ getHeading: () => heading.current() ?? heading.heading });
   app.sim.addEventListener('advertisement', handleAdvertisement);
@@ -203,6 +225,7 @@ function stopAll() {
   if (app.mode === 'demo') {
     stopDemo();
     restoreRemembered();
+    refreshConnected();
   } else if (app.bt) {
     app.bt.stopScan();
     if (!app.bt.active) app.mode = null;
@@ -257,10 +280,13 @@ function createRow(id) {
 function updateRow(row, device, now) {
   const fresh = device.lastSeen !== null && now - device.lastSeen < 10000;
   const meta = [];
+  const connected = app.connected.has(device.id);
   if (device.source === 'demo') meta.push('Simulated');
   else if (app.remembered.has(device.id)) meta.push('Remembered');
+  else if (connected) meta.push('Connected to iPhone');
   if (device.name && device.manufacturer) meta.push(device.manufacturer);
-  meta.push(device.lastSeen !== null ? `heard ${ago(now - device.lastSeen)}` : 'not heard yet');
+  if (device.lastSeen !== null) meta.push(`heard ${ago(now - device.lastSeen)}`);
+  else meta.push(connected ? 'tap to read its signal' : 'not heard yet');
 
   row.name.textContent = displayName(device);
   row.meta.textContent = meta.join(' · ');
@@ -275,7 +301,10 @@ function renderList() {
   const now = performance.now();
   const text = $('filter-text').value.trim().toLowerCase();
   const namedOnly = $('filter-named').checked;
-  let devices = registry.list().filter((d) => (!namedOnly || d.name) && (!text || displayName(d).toLowerCase().includes(text)));
+  const connectedOnly = NATIVE && $('filter-connected').checked;
+  let devices = registry.list().filter((d) => (!namedOnly || d.name)
+    && (!connectedOnly || app.connected.has(d.id))
+    && (!text || displayName(d).toLowerCase().includes(text)));
 
   // Re-sort by signal every few seconds only, so rows do not jump under your finger.
   const ids = new Set(devices.map((d) => d.id));
@@ -301,7 +330,9 @@ function renderList() {
 
   const empty = $('list-empty');
   empty.hidden = devices.length > 0;
-  if (registry.devices.size > 0) empty.textContent = 'No devices match the filter.';
+  if (connectedOnly && app.connected.size === 0) {
+    empty.textContent = 'No connected devices found. iOS lists connected Bluetooth LE devices such as watches, fitness trackers and keyboards, but not devices that only use Classic Bluetooth.';
+  } else if (registry.devices.size > 0) empty.textContent = 'No devices match the filter.';
   else if (app.mode === 'demo') empty.textContent = 'Starting the demo…';
   else if (app.bt?.scanning) empty.textContent = 'Listening… make sure the device is switched on and nearby.';
   else empty.textContent = NATIVE ? 'Tap Scan nearby devices, or try the demo.' : 'Start a scan, pick a device, or try the demo.';
@@ -322,6 +353,11 @@ async function selectDevice(id, { push = true } = {}) {
   const known = app.remembered.get(id);
   if (known && app.bt && !app.bt.watched.has(id) && !app.bt.scanning) {
     app.bt.watchDevice(known).catch((error) => toast(describeBluetoothError(error), true));
+  }
+  if (NATIVE && app.connected.has(id)) {
+    // Connected devices rarely advertise: read the signal over the connection.
+    ensureBluetoothMode();
+    app.bt.follow(id);
   }
   showFinder(push);
 }
@@ -347,10 +383,12 @@ function showFinder(push) {
 function showList() {
   $('finder-view').hidden = true;
   $('list-view').hidden = false;
+  if (NATIVE && app.selectedId) app.bt?.unfollow(app.selectedId);
   app.selectedId = null;
   app.autoTurn = null;
   beeper.setLevel(null);
   releaseWakeLock();
+  updateModeUi();
   renderList();
 }
 
@@ -418,11 +456,14 @@ function updateFinderInfo(now) {
   $('finder-meta').textContent = meta.join(' · ');
 
   // Signal-lost warning.
+  const connected = app.connected.has(device.id);
   const silentFor = now - (device.lastSeen ?? app.selectedAt);
   const alert = $('signal-alert');
   alert.hidden = silentFor < 10000;
   if (!alert.hidden) {
-    alert.textContent = `No signal for ${Math.round(silentFor / 1000)} s. The device may be out of range or switched off, or connected to a phone or computer (connected devices often stop advertising).`;
+    alert.textContent = connected
+      ? `No signal for ${Math.round(silentFor / 1000)} s. The device may be out of range or switched off. BT Finder keeps trying to reach it.`
+      : `No signal for ${Math.round(silentFor / 1000)} s. The device may be out of range or switched off, or connected to a phone or computer (connected devices often stop advertising).`;
   }
 
   // Direction text and arrow.
@@ -430,7 +471,13 @@ function updateFinderInfo(now) {
   const facing = heading.current();
   let main;
   let sub;
-  if (device.lastSeen === null) {
+  if (device.lastSeen === null && connected) {
+    const error = app.bt?.followError?.(device.id);
+    main = 'Connecting to the device…';
+    sub = error
+      ? `Not reachable yet (${error}). Trying again…`
+      : 'It is connected to this iPhone, so BT Finder reads its signal over that connection.';
+  } else if (device.lastSeen === null) {
     main = 'Waiting for signal…';
     sub = 'Make sure the device is switched on and nearby.';
   } else if (facing === null) {
@@ -721,6 +768,14 @@ function wireEvents() {
     saveSettings();
     renderList();
   });
+  $('filter-connected-label').hidden = !NATIVE; // only the app can see connected devices
+  $('filter-connected').checked = settings.connectedOnly;
+  $('filter-connected').addEventListener('change', () => {
+    settings.connectedOnly = $('filter-connected').checked;
+    saveSettings();
+    renderList();
+    refreshConnected().then(renderList);
+  });
 
   $('btn-reset').addEventListener('click', () => {
     estimator.reset();
@@ -793,7 +848,9 @@ async function init() {
   updateModeUi();
   renderList();
   setInterval(() => {
-    if (!finderVisible()) renderList();
+    if (finderVisible()) return;
+    renderList();
+    if (NATIVE && performance.now() - app.connectedAt > 5000) refreshConnected();
   }, 1000);
 }
 

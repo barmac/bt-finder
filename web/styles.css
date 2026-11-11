@@ -130,9 +130,9 @@ code { font-size: 0.85em; word-break: break-all; background: var(--surface-2); p
 
 /* ----- list ----- */
 
-.list-controls { display: flex; gap: 10px; align-items: center; margin: 16px 0 10px; }
+.list-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0 10px; }
 .list-controls input[type="search"] {
-  flex: 1;
+  flex: 1 1 10rem;
   min-width: 0;
   font: inherit;
   padding: 10px 12px;

@@ -54,7 +54,9 @@ The app checks all of this itself and tells you what is missing.
 - Only **Bluetooth Low Energy** devices that are **advertising** can be found. Classic-only Bluetooth devices
   (older headsets, car kits) are invisible to web pages.
 - Many devices **stop advertising while connected** to a phone or computer. To find them, disconnect them
-  first, for example by turning Bluetooth off on the phone they are paired with.
+  first, for example by turning Bluetooth off on the phone they are paired with. The iPhone app can also
+  find Bluetooth LE devices that are connected to that iPhone, such as a watch
+  (see [Connected devices](#connected-devices)).
 - Phones, AirPods and many trackers change their Bluetooth address every few minutes for privacy, so they
   may appear as a new entry after a while.
 - Metal, walls and reflections distort signal strength. If the result says *No clear direction*, move a
@@ -98,6 +100,15 @@ Program membership makes installs last a year and allows TestFlight.
 
 In the app, **Scan nearby devices** sees every advertising device directly, so there is no
 *Pick a device* button and no browser flag to turn on.
+
+### Connected devices
+
+A watch or fitness tracker that is connected to the iPhone (for example through Garmin Connect) usually
+stops advertising, so a scan cannot see it. The app lists such devices anyway; tick **Connected to iPhone**
+to show only those. When you pick one, BT Finder connects to it too and reads its signal strength over
+that connection several times a second. The connection is shared, so the device's own app keeps working.
+iOS only lists Bluetooth LE devices that offer one of the services the app asks for (common standard ones
+and Garmin's), and never devices that use only Classic Bluetooth.
 
 ## Run it locally
 

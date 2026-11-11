@@ -48,6 +48,61 @@ export function nativeBluetoothReady() {
   return ready();
 }
 
+/** For tests: use a fake plugin instead of Capacitor's. */
+export function setPluginForTesting(plugin) {
+  ble = plugin;
+  loadPromise = Promise.resolve();
+  readyPromise = Promise.resolve();
+}
+
+// iOS only lists connected devices that offer one of the services you name,
+// so ask for the common standard ones plus Garmin's own. Devices that only
+// use Classic Bluetooth are never listed.
+export const CONNECTED_SERVICES = [
+  '1800', // Generic Access (every device has it, but iOS may not match on it)
+  '180a', // Device Information
+  '180f', // Battery
+  '180d', // Heart Rate
+  '1812', // Human Interface Device: keyboards, mice, remotes
+  '1814', // Running Speed and Cadence
+  '1816', // Cycling Speed and Cadence
+  '1818', // Cycling Power
+  '1826', // Fitness Machine
+  'fe1f', // Garmin
+  '6a4e2401-667b-11e3-949a-0800200c9a66', // Garmin watches (GFDI)
+  '6a4e2500-667b-11e3-949a-0800200c9a66', // Garmin watches
+  '6a4e2800-667b-11e3-949a-0800200c9a66', // Garmin watches (multi-link)
+];
+
+/**
+ * Bluetooth LE devices that are connected to this iPhone (by any app, e.g.
+ * Garmin Connect), as [{ id, name }]. Connected devices often stop
+ * advertising, so a scan does not see them.
+ */
+export async function connectedDevices() {
+  await ready();
+  const result = await ble.getConnectedDevices({ services: CONNECTED_SERVICES });
+  return (result?.devices ?? [])
+    .filter((device) => device?.deviceId)
+    .map((device) => ({ id: device.deviceId, name: device.name ?? '' }));
+}
+
+/** Convert an RSSI reading of a connected device (the plugin sends a string) into an advertisement. */
+export function fromRssiReading(id, value, t) {
+  return {
+    id,
+    name: '',
+    rssi: Number(value),
+    txPower: null,
+    manufacturerIds: [],
+    uuids: [],
+    t,
+    source: 'connected',
+  };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function withTimeout(promise, ms) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -119,15 +174,79 @@ export async function detectNativeCapabilities({ timeoutMs = 4000 } = {}) {
 }
 
 export class NativeBluetoothSource extends EventTarget {
-  constructor() {
+  /**
+   * `rssiIntervalMs`: pause between signal readings of a connected device.
+   * `retryMs`: wait before reconnecting after a connected device was lost.
+   */
+  constructor({ rssiIntervalMs = 100, retryMs = 2000 } = {}) {
     super();
-    this.watched = new Map(); // single-device watching is not needed: scanning sees everything
+    // Connected devices being followed: id -> { stopped, connected, error }.
+    // Advertising devices need no following: scanning sees them all.
+    this.watched = new Map();
     this.isScanning = false;
     this.listener = null;
+    this.rssiIntervalMs = rssiIntervalMs;
+    this.retryMs = retryMs;
   }
 
   get active() {
-    return this.isScanning;
+    return this.isScanning || this.watched.size > 0;
+  }
+
+  /**
+   * Follow a device that is connected to the iPhone: connect to it from this
+   * app too (the existing connection is shared, other apps are not affected)
+   * and read its signal strength several times a second. The readings arrive
+   * as "advertisement" events like scan results.
+   */
+  follow(id) {
+    if (this.watched.has(id)) return;
+    const entry = { stopped: false, connected: false, error: null };
+    this.watched.set(id, entry);
+    this.#followLoop(id, entry);
+  }
+
+  /** Stop following a connected device and drop this app's connection to it. */
+  unfollow(id) {
+    const entry = this.watched.get(id);
+    if (!entry) return;
+    entry.stopped = true;
+    this.watched.delete(id);
+    if (entry.connected) ble.disconnect({ deviceId: id }).catch(() => {});
+  }
+
+  /** Last error while following `id`, or null. */
+  followError(id) {
+    return this.watched.get(id)?.error ?? null;
+  }
+
+  async #followLoop(id, entry) {
+    while (!entry.stopped) {
+      try {
+        if (!entry.connected) {
+          await ready();
+          // Service discovery is part of connecting; descriptors are not needed.
+          await ble.connect({ deviceId: id, timeout: 10000, skipDescriptorDiscovery: true });
+          entry.connected = true;
+          if (entry.stopped) {
+            ble.disconnect({ deviceId: id }).catch(() => {});
+            return;
+          }
+        }
+        const { value } = await ble.readRssi({ deviceId: id });
+        if (entry.stopped) return;
+        entry.error = null;
+        const ad = fromRssiReading(id, value, performance.now());
+        this.dispatchEvent(new CustomEvent('advertisement', { detail: ad }));
+        await sleep(this.rssiIntervalMs);
+      } catch (error) {
+        // Out of range, switched off or disconnected: try again in a moment.
+        entry.connected = false;
+        entry.error = error?.message ?? String(error);
+        if (entry.stopped) return;
+        await sleep(this.retryMs);
+      }
+    }
   }
 
   get scanning() {
@@ -172,6 +291,7 @@ export class NativeBluetoothSource extends EventTarget {
 
   stop() {
     this.stopScan();
+    for (const id of [...this.watched.keys()]) this.unfollow(id);
     this.listener?.remove();
     this.listener = null;
   }
