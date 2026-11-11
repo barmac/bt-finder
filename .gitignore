@@ -1,2 +1,4 @@
 node_modules/
 .DS_Store
+# Copied from node_modules by `npm run ios:sync`
+web/vendor/

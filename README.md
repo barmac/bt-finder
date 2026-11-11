@@ -6,8 +6,10 @@ A web app that finds nearby Bluetooth devices and shows the approximate directio
 - Points an arrow toward the selected device, with an uncertainty wedge
 - Shows a warmer/colder trend, a 30-second signal graph, and optional Geiger-counter beeps
 - Includes a demo mode with simulated devices, so you can try it on any browser
+- Runs as a website (Chrome on Android and desktop) and as an [iPhone app](#iphone-app)
 
-No build step and no dependencies: plain HTML, CSS and JavaScript modules in [`web/`](web/).
+The app is plain HTML, CSS and JavaScript modules in [`web/`](web/), with no build step. The iPhone
+app wraps the same code with [Capacitor](https://capacitorjs.com/).
 
 ## How the direction is estimated
 
@@ -30,7 +32,7 @@ specific device makes it better.
 
 | What | Why |
 | --- | --- |
-| **Chrome or Edge**: Android (best), Windows, macOS, ChromeOS | Web Bluetooth is not available in Firefox or Safari. On iPhone, the [Bluefy](https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055) browser supports it. |
+| **Chrome or Edge**: Android (best), Windows, macOS, ChromeOS | Web Bluetooth is not available in Firefox or Safari. On iPhone, use the [iPhone app](#iphone-app). |
 | **The flag** `chrome://flags/#enable-experimental-web-platform-features` set to *Enabled* | Reading signal strength (`requestLEScan()` and `watchAdvertisements()`) is still experimental in Chrome. |
 | **HTTPS** (or `localhost`) | Browsers only allow Bluetooth on secure pages. |
 | **A phone with a compass** | To know which way you are facing. Without one, you can set your direction by hand. |
@@ -58,11 +60,50 @@ The app checks all of this itself and tells you what is missing.
 - Metal, walls and reflections distort signal strength. If the result says *No clear direction*, move a
   few metres and sweep again.
 
+## iPhone app
+
+Safari (and every other iPhone browser) has no Web Bluetooth, so on iPhone the same app runs inside a
+native shell made with Capacitor. Bluetooth goes through Apple's CoreBluetooth via the
+[`@capacitor-community/bluetooth-le`](https://github.com/capacitor-community/bluetooth-le) plugin
+([`native-bluetooth.js`](web/js/native-bluetooth.js)). Everything else is the same code as the website.
+
+**You need:** a Mac with **Xcode 26 or later** and **Node 22 or later**, an iPhone with its cable, and an
+Apple ID (a free one works).
+
+```sh
+git clone https://github.com/barmac/bt-finder.git
+cd bt-finder
+npm install
+npm run ios:sync     # copies web/ into the Xcode project
+npm run ios:open     # opens Xcode
+```
+
+In Xcode:
+
+1. **Xcode → Settings → Accounts**: add your Apple ID.
+2. In the left sidebar select **App**, then the **App** target → **Signing & Capabilities** →
+   **Team**: pick your Apple ID ("Personal Team"). If Xcode says the bundle identifier is not available,
+   change `io.github.barmac.btfinder` to something unique of your own.
+3. Plug in the iPhone, unlock it and tap **Trust**. On the iPhone, turn on
+   **Settings → Privacy & Security → Developer Mode** (it restarts the phone).
+4. Choose your iPhone as the run destination at the top of the Xcode window and press **▶ Run**.
+   The first build downloads the Capacitor packages and takes a few minutes.
+5. With a free Apple ID, the first launch is blocked as an "Untrusted Developer": on the iPhone go to
+   **Settings → General → VPN & Device Management**, tap your Apple ID and **Trust**, then open the app.
+6. Allow Bluetooth when the app asks.
+
+After changing anything in `web/`, run `npm run ios:sync` and press Run again. With a free Apple ID the
+app stops opening after 7 days; reconnect the phone and press Run to reinstall it. A paid Apple Developer
+Program membership makes installs last a year and allows TestFlight.
+
+In the app, **Scan nearby devices** sees every advertising device directly, so there is no
+*Pick a device* button and no browser flag to turn on.
+
 ## Run it locally
 
 ```sh
 npm start          # serves web/ at http://localhost:8080 (demo: http://localhost:8080/?demo)
-npm test           # unit tests (Node 20+, no dependencies)
+npm test           # unit tests (no npm install needed)
 ```
 
 To try it on an Android phone during development, either deploy it (below) or use Chrome's
@@ -83,6 +124,7 @@ web/
   index.html, styles.css, manifest.webmanifest, icon.svg
   js/app.js               UI and wiring
   js/bluetooth.js         Web Bluetooth scanning / watching, capability checks
+  js/native-bluetooth.js  the same for the iPhone app (CoreBluetooth via Capacitor)
   js/heading.js           compass heading from device orientation, or manual
   js/orientation-math.js  heading from alpha/beta/gamma (flat, tilted or upright phone)
   js/direction.js         bearing estimate from heading + RSSI samples
@@ -90,6 +132,9 @@ web/
   js/devices.js           per-device records and history
   js/simulator.js         demo world with simulated devices
   js/dial.js, beeper.js   compass dial rendering, sound feedback
+ios/                      Xcode project for the iPhone app (Capacitor)
+capacitor.config.json     app id and name for the iPhone app
 test/                     node:test unit tests
 scripts/serve.mjs         tiny static server for development
+scripts/vendor-capacitor.mjs  copies Capacitor's runtime into web/vendor/ for the app
 ```

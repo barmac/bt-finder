@@ -3,12 +3,15 @@ import { DirectionEstimator } from './direction.js';
 import { DeviceRegistry, displayName } from './devices.js';
 import { estimateDistance, distanceLabel, rssiAt1m, rssiTrend, trendLabel, signalQuality, isValidRssi } from './signal.js';
 import { BluetoothSource, detectCapabilities, describeBluetoothError } from './bluetooth.js';
+import { NativeBluetoothSource, detectNativeCapabilities, isNativeApp } from './native-bluetooth.js';
 import { SimulatedSource } from './simulator.js';
 import { HeadingProvider } from './heading.js';
 import { Dial, drawSparkline } from './dial.js';
 import { Beeper } from './beeper.js';
 
 const $ = (id) => document.getElementById(id);
+/** Running inside the iPhone app (Capacitor) rather than a browser. */
+const NATIVE = isNativeApp();
 const FLAG_URL = 'chrome://flags/#enable-experimental-web-platform-features';
 
 // ---------------------------------------------------------------- settings
@@ -111,7 +114,7 @@ function handleAdvertisement(event) {
 function ensureBluetoothMode() {
   if (app.mode === 'demo') stopDemo();
   if (!app.bt) {
-    app.bt = new BluetoothSource();
+    app.bt = NATIVE ? new NativeBluetoothSource() : new BluetoothSource();
     app.bt.addEventListener('advertisement', handleAdvertisement);
     app.bt.addEventListener('device', (event) => {
       registry.touch(event.detail);
@@ -129,6 +132,11 @@ async function startScan() {
     toast('Scanning. Nearby devices will appear below.');
   } catch (error) {
     toast(describeBluetoothError(error), true);
+  }
+  if (NATIVE) {
+    // Bluetooth may have been switched on or allowed since launch.
+    app.caps = await detectNativeCapabilities();
+    renderNotice();
   }
   updateModeUi();
 }
@@ -289,12 +297,13 @@ function renderList() {
   if (registry.devices.size > 0) empty.textContent = 'No devices match the filter.';
   else if (app.mode === 'demo') empty.textContent = 'Starting the demo…';
   else if (app.bt?.scanning) empty.textContent = 'Listening… make sure the device is switched on and nearby.';
-  else empty.textContent = 'Start a scan, pick a device, or try the demo.';
+  else empty.textContent = NATIVE ? 'Tap Scan nearby devices, or try the demo.' : 'Start a scan, pick a device, or try the demo.';
 }
 
 // ------------------------------------------------------------ finder view
 
 async function selectDevice(id, { push = true } = {}) {
+  heading.startCompass().then(updateCapabilityUi); // inside the tap, for iOS
   app.selectedId = id;
   app.selectedAt = performance.now();
   estimator.reset();
@@ -606,13 +615,18 @@ function updateCapabilityUi() {
   const caps = app.caps;
   if (!caps) return;
   const btOk = caps.webBluetooth && caps.adapter !== false;
-  setChip('chip-bluetooth', btOk ? 'ok' : 'bad', btOk ? 'Bluetooth ✓' : 'No Bluetooth');
+  setChip('chip-bluetooth', btOk ? 'ok' : 'bad', btOk ? 'Bluetooth ✓' : caps.native ? 'Bluetooth off' : 'No Bluetooth');
   const signalOk = caps.scan || caps.watch;
   setChip('chip-signal', signalOk ? 'ok' : 'bad', signalOk ? 'Signal strength ✓' : 'No signal strength');
   setChip('chip-compass', heading.compassAvailable ? 'ok' : 'unknown', heading.compassAvailable ? 'Compass ✓' : 'No compass');
 
-  $('btn-scan').disabled = !btOk || !caps.scan || Boolean(app.bt?.scanning);
+  // In the app, Scan stays tappable when Bluetooth is off or not allowed: the
+  // tap re-checks and explains what to change (Control Center does not
+  // trigger any event the page can see).
+  const canScan = caps.native ? caps.problem !== 'unsupported' : btOk && caps.scan;
+  $('btn-scan').disabled = !canScan || Boolean(app.bt?.scanning);
   $('btn-pick').disabled = !btOk || !caps.watch;
+  $('btn-pick').hidden = Boolean(caps.native); // the app's scan already sees every device
   $('btn-scan').title = caps.scan ? '' : 'Needs the experimental Web Bluetooth scanning API';
   $('btn-pick').title = caps.watch ? '' : 'Needs watchAdvertisements(), an experimental Web Bluetooth API';
 }
@@ -621,10 +635,18 @@ function renderNotice() {
   const caps = app.caps;
   const notice = $('notice');
   let html = '';
-  if (!caps.secureContext) {
+  if (caps.native) {
+    if (caps.problem === 'denied') {
+      html = '<strong>Bluetooth access is off for BT Finder.</strong> Turn it on in Settings → Privacy &amp; Security → Bluetooth, then come back.';
+    } else if (caps.problem === 'unsupported') {
+      html = '<strong>Bluetooth is not available on this device.</strong> You can still try the demo.';
+    } else if (caps.adapter === false) {
+      html = '<strong>Bluetooth is off.</strong> Turn it on in Control Center, then tap Scan.';
+    }
+  } else if (!caps.secureContext) {
     html = '<strong>Open this page over HTTPS.</strong> Browsers only allow Bluetooth on secure pages (https:// or localhost).';
   } else if (!caps.webBluetooth) {
-    html = '<strong>This browser has no Web Bluetooth.</strong> Use Chrome or Edge on Android, Windows, macOS or ChromeOS. On iPhone, Safari cannot do this, but the Bluefy browser can. You can still try the demo.';
+    html = '<strong>This browser has no Web Bluetooth.</strong> Use Chrome or Edge on Android, Windows, macOS or ChromeOS. On iPhone no browser can do this; use the BT Finder iPhone app instead (see the project README). You can still try the demo.';
   } else if (caps.adapter === false) {
     html = '<strong>Bluetooth seems to be off.</strong> Turn on Bluetooth (and on Android, Location) and reload the page.';
   } else if (!caps.scan || !caps.watch) {
@@ -725,8 +747,12 @@ function wireEvents() {
   $('btn-step-back').addEventListener('click', () => app.sim?.step(-1));
   $('show-truth').addEventListener('change', () => { app.showTruth = $('show-truth').checked; });
 
-  document.addEventListener('visibilitychange', () => {
+  document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState === 'visible' && finderVisible()) requestWakeLock();
+    if (document.visibilityState === 'visible' && NATIVE) {
+      app.caps = await detectNativeCapabilities();
+      renderNotice();
+    }
     updateModeUi();
   });
   navigator.bluetooth?.addEventListener?.('availabilitychanged', (event) => {
@@ -738,7 +764,7 @@ function wireEvents() {
 
 async function init() {
   if (location.hash === '#finder') history.replaceState(null, '', location.pathname + location.search);
-  app.caps = await detectCapabilities();
+  app.caps = NATIVE ? await detectNativeCapabilities() : await detectCapabilities();
   wireEvents();
   renderNotice();
   updateModeUi();
