@@ -1,0 +1,14 @@
+{
+  "name": "BT Finder",
+  "short_name": "BT Finder",
+  "description": "Find nearby Bluetooth devices and see roughly which way they are.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

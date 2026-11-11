@@ -1,0 +1,14 @@
+{
+  "name": "bt-finder",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web app that finds nearby Bluetooth devices and estimates which way they are.",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>BT Finder</title>
+  <meta name="description" content="Find nearby Bluetooth devices and see roughly which way they are.">
+  <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f5f7fa" media="(prefers-color-scheme: light)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <main id="list-view" class="view">
+    <header class="app-header">
+      <div class="brand">
+        <img src="icon.svg" alt="" width="32" height="32">
+        <h1>BT Finder</h1>
+      </div>
+      <ul class="chips" aria-label="What this browser supports">
+        <li id="chip-bluetooth" class="chip">Bluetooth</li>
+        <li id="chip-signal" class="chip">Signal strength</li>
+        <li id="chip-compass" class="chip">Compass</li>
+      </ul>
+    </header>
+
+    <section id="notice" class="notice" hidden></section>
+
+    <section class="actions" aria-label="Start">
+      <button id="btn-scan" class="btn primary" type="button">Scan nearby devices</button>
+      <button id="btn-pick" class="btn" type="button">Pick a device…</button>
+      <button id="btn-demo" class="btn ghost" type="button">Try the demo</button>
+      <button id="btn-stop" class="btn ghost" type="button" hidden>Stop</button>
+    </section>
+
+    <div id="mode-banner" class="banner" hidden></div>
+
+    <section class="list-controls" aria-label="Filter devices">
+      <input id="filter-text" type="search" placeholder="Filter by name" autocomplete="off" aria-label="Filter by name">
+      <label class="toggle"><input id="filter-named" type="checkbox"> Named only</label>
+    </section>
+
+    <ul id="device-list" class="device-list" aria-live="polite"></ul>
+    <p id="list-empty" class="empty">Start a scan, pick a device, or try the demo.</p>
+
+    <details class="help">
+      <summary>How does it work?</summary>
+      <p>Bluetooth radios do not report a direction, only signal strength. Your body absorbs a lot of
+        Bluetooth signal, so if you hold the phone in front of your chest and turn around slowly,
+        the signal is strongest when you face the device. BT Finder combines those readings with
+        your phone's compass to estimate the direction, and uses the signal strength for a rough distance.</p>
+      <p>Only Bluetooth Low Energy devices that are advertising can be found. Many devices stop
+        advertising while they are connected to a phone or computer, so disconnect them first.</p>
+    </details>
+  </main>
+
+  <section id="finder-view" class="view" hidden>
+    <header class="finder-header">
+      <button id="btn-back" class="btn ghost back" type="button" aria-label="Back to devices">‹ Devices</button>
+      <div class="finder-title">
+        <h2 id="finder-name">Device</h2>
+        <p id="finder-meta" class="muted"></p>
+      </div>
+    </header>
+
+    <div class="dial-wrap">
+      <svg id="dial" class="dial" role="img" aria-label="Compass showing the estimated direction to the device" tabindex="0"></svg>
+    </div>
+
+    <div class="direction" aria-live="polite">
+      <p id="dir-main" class="dir-main">Waiting for signal…</p>
+      <p id="dir-sub" class="dir-sub muted"></p>
+    </div>
+
+    <p id="signal-alert" class="alert" hidden></p>
+
+    <section id="facing" class="panel" hidden>
+      <h3>Which way are you facing?</h3>
+      <p id="facing-help" class="muted">No compass found. Drag the dial, use the slider, or press ← → to set the way you face.</p>
+      <label class="slider">
+        <input id="facing-slider" type="range" min="0" max="359" step="1" value="0">
+        <output id="facing-value">0° N</output>
+      </label>
+      <button id="btn-compass" class="link" type="button" hidden>Use the phone's compass</button>
+    </section>
+    <button id="btn-manual" class="link" type="button" hidden>Set direction by hand</button>
+
+    <section id="demo-controls" class="panel" hidden>
+      <h3>Demo controls</h3>
+      <div class="controls">
+        <button id="btn-autoturn" class="btn" type="button">Turn around for me</button>
+        <button id="btn-step" class="btn" type="button">Step forward</button>
+        <button id="btn-step-back" class="btn" type="button">Step back</button>
+      </div>
+      <label class="toggle"><input id="show-truth" type="checkbox"> Show the real direction</label>
+      <p class="muted small">Keyboard: ← → turn, ↑ ↓ walk.</p>
+    </section>
+
+
+    <dl class="stats">
+      <div><dt>Signal</dt><dd id="stat-signal">—</dd></div>
+      <div><dt>Distance</dt><dd id="stat-distance">—</dd></div>
+      <div><dt>Trend</dt><dd id="stat-trend">—</dd></div>
+      <div><dt>Circle covered</dt><dd id="stat-coverage">0%</dd></div>
+    </dl>
+
+    <figure class="spark-wrap">
+      <svg id="sparkline" class="sparkline" aria-hidden="true"></svg>
+      <figcaption class="muted">Signal over the last 30 s</figcaption>
+    </figure>
+
+    <div class="controls">
+      <button id="btn-reset" class="btn" type="button">Restart sweep</button>
+      <button id="btn-calibrate" class="btn" type="button">Calibrate at 1 m</button>
+      <button id="btn-sound" class="btn" type="button" aria-pressed="false">Sound: off</button>
+    </div>
+    <button id="btn-clear-cal" class="link" type="button" hidden>Clear calibration</button>
+
+    <details class="help" open>
+      <summary>How to find the direction</summary>
+      <ol>
+        <li>Hold the phone flat in front of your chest, top edge pointing forward.</li>
+        <li>Turn slowly on the spot, a full circle in about 15 seconds.</li>
+        <li>The arrow points where the signal was strongest. The shaded wedge shows how sure it is.</li>
+        <li>Walk that way a few metres, then turn around again. Use the trend and distance to tell when you are close.</li>
+      </ol>
+    </details>
+  </section>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
