@@ -3,7 +3,7 @@ import { DirectionEstimator } from './direction.js';
 import { DeviceRegistry, displayName } from './devices.js';
 import { estimateDistance, distanceLabel, rssiAt1m, rssiTrend, trendLabel, signalQuality, isValidRssi } from './signal.js';
 import { BluetoothSource, detectCapabilities, describeBluetoothError } from './bluetooth.js';
-import { NativeBluetoothSource, detectNativeCapabilities, isNativeApp } from './native-bluetooth.js';
+import { NativeBluetoothSource, detectNativeCapabilities, isNativeApp, nativeBluetoothReady } from './native-bluetooth.js';
 import { SimulatedSource } from './simulator.js';
 import { HeadingProvider } from './heading.js';
 import { Dial, drawSparkline } from './dial.js';
@@ -133,12 +133,19 @@ async function startScan() {
   } catch (error) {
     toast(describeBluetoothError(error), true);
   }
-  if (NATIVE) {
-    // Bluetooth may have been switched on or allowed since launch.
-    app.caps = await detectNativeCapabilities();
-    renderNotice();
-  }
+  // Bluetooth may have been switched on or allowed since launch.
+  if (NATIVE) await refreshNativeCapabilities();
   updateModeUi();
+}
+
+async function refreshNativeCapabilities() {
+  app.caps = await detectNativeCapabilities();
+  renderNotice();
+  updateModeUi();
+  if (app.caps.problem === 'waiting') {
+    // Check again as soon as iOS answers (e.g. after the permission prompt).
+    nativeBluetoothReady().then(refreshNativeCapabilities, refreshNativeCapabilities);
+  }
 }
 
 async function pickDevice() {
@@ -605,6 +612,12 @@ function releaseWakeLock() {
 
 // -------------------------------------------------- capabilities and modes
 
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 function setChip(id, state, text) {
   const chip = $(id);
   chip.className = `chip ${state}`;
@@ -615,7 +628,8 @@ function updateCapabilityUi() {
   const caps = app.caps;
   if (!caps) return;
   const btOk = caps.webBluetooth && caps.adapter !== false;
-  setChip('chip-bluetooth', btOk ? 'ok' : 'bad', btOk ? 'Bluetooth ✓' : caps.native ? 'Bluetooth off' : 'No Bluetooth');
+  if (caps.problem === 'waiting') setChip('chip-bluetooth', 'unknown', 'Bluetooth…');
+  else setChip('chip-bluetooth', btOk ? 'ok' : 'bad', btOk ? 'Bluetooth ✓' : caps.native ? 'Bluetooth off' : 'No Bluetooth');
   const signalOk = caps.scan || caps.watch;
   setChip('chip-signal', signalOk ? 'ok' : 'bad', signalOk ? 'Signal strength ✓' : 'No signal strength');
   setChip('chip-compass', heading.compassAvailable ? 'ok' : 'unknown', heading.compassAvailable ? 'Compass ✓' : 'No compass');
@@ -636,10 +650,12 @@ function renderNotice() {
   const notice = $('notice');
   let html = '';
   if (caps.native) {
-    if (caps.problem === 'denied') {
+    if (caps.problem === 'waiting') {
+      html = '<strong>Waiting for Bluetooth…</strong> If iOS asks whether BT Finder may use Bluetooth, tap Allow.';
+    } else if (caps.problem === 'denied') {
       html = '<strong>Bluetooth access is off for BT Finder.</strong> Turn it on in Settings → Privacy &amp; Security → Bluetooth, then come back.';
     } else if (caps.problem === 'unsupported') {
-      html = '<strong>Bluetooth is not available on this device.</strong> You can still try the demo.';
+      html = `<strong>Bluetooth could not be started.</strong> ${escapeHtml(caps.error ?? '')} You can still try the demo.`;
     } else if (caps.adapter === false) {
       html = '<strong>Bluetooth is off.</strong> Turn it on in Control Center, then tap Scan.';
     }
@@ -749,10 +765,7 @@ function wireEvents() {
 
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState === 'visible' && finderVisible()) requestWakeLock();
-    if (document.visibilityState === 'visible' && NATIVE) {
-      app.caps = await detectNativeCapabilities();
-      renderNotice();
-    }
+    if (document.visibilityState === 'visible' && NATIVE) await refreshNativeCapabilities();
     updateModeUi();
   });
   navigator.bluetooth?.addEventListener?.('availabilitychanged', (event) => {
@@ -764,12 +777,17 @@ function wireEvents() {
 
 async function init() {
   if (location.hash === '#finder') history.replaceState(null, '', location.pathname + location.search);
-  app.caps = NATIVE ? await detectNativeCapabilities() : await detectCapabilities();
+  // Buttons first, so the app responds even if a Bluetooth check is slow.
   wireEvents();
-  renderNotice();
-  updateModeUi();
+  renderList();
   // Works without a tap on Android; iOS asks again on the first button press.
   heading.startCompass().then(updateCapabilityUi);
+  if (NATIVE) {
+    await refreshNativeCapabilities();
+  } else {
+    app.caps = await detectCapabilities();
+    renderNotice();
+  }
   if (new URLSearchParams(location.search).has('demo')) startDemo();
   else await restoreRemembered();
   updateModeUi();
@@ -779,4 +797,13 @@ async function init() {
   }, 1000);
 }
 
-init();
+// Show unexpected errors instead of failing silently (they also reach the
+// Xcode console in the iPhone app).
+function reportError(error) {
+  console.error(error);
+  toast(`Something went wrong: ${error?.message ?? error}`, true);
+}
+window.addEventListener('error', (event) => reportError(event.error ?? event.message));
+window.addEventListener('unhandledrejection', (event) => reportError(event.reason));
+
+init().catch(reportError);

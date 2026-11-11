@@ -10,28 +10,54 @@ export function isNativeApp() {
   return typeof window !== 'undefined' && window.Capacitor?.isNativePlatform?.() === true;
 }
 
-let pluginPromise = null;
+// The Capacitor plugin object. IMPORTANT: never resolve a promise with it or
+// return it from an async function. It is a Proxy that answers to every
+// property name, including "then", so promises treat it as a thenable and
+// wait on it forever. Keep it in this variable and resolve promises to nothing.
+let ble = null;
+let loadPromise = null;
 let readyPromise = null;
 
+/** Load Capacitor's runtime and the plugin into `ble`. Resolves to undefined. */
 function loadPlugin() {
   // web/vendor/capacitor-core.js is copied from @capacitor/core by
   // `npm run ios:sync` (scripts/vendor-capacitor.mjs); it only exists in the app.
-  pluginPromise ??= import('../vendor/capacitor-core.js').then(({ registerPlugin }) => registerPlugin('BluetoothLe'));
-  return pluginPromise;
+  loadPromise ??= import('../vendor/capacitor-core.js').then(({ registerPlugin }) => {
+    ble = registerPlugin('BluetoothLe');
+  });
+  return loadPromise;
 }
 
-/** Start CoreBluetooth once. iOS asks for Bluetooth permission the first time. */
+/**
+ * Start CoreBluetooth once; afterwards `ble` is usable. iOS asks for
+ * Bluetooth permission the first time. Resolves to undefined.
+ */
 function ready() {
   readyPromise ??= loadPlugin()
-    .then(async (ble) => {
-      await ble.initialize();
-      return ble;
-    })
+    .then(() => ble.initialize())
+    .then(() => undefined)
     .catch((error) => {
       readyPromise = null;
       throw error;
     });
   return readyPromise;
+}
+
+/** Resolves once CoreBluetooth has started (after the user answers the permission prompt). */
+export function nativeBluetoothReady() {
+  return ready();
+}
+
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`No answer from Bluetooth after ${ms} ms`);
+      error.name = 'TimeoutError';
+      reject(error);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function nativeError(message) {
@@ -58,8 +84,13 @@ export function fromScanResult(result, t) {
   };
 }
 
-/** Capabilities in the same shape as detectCapabilities() in bluetooth.js. */
-export async function detectNativeCapabilities() {
+/**
+ * Capabilities in the same shape as detectCapabilities() in bluetooth.js.
+ * Never waits more than `timeoutMs`: CoreBluetooth only answers once iOS has
+ * reported its state, which waits for the user on the permission prompt.
+ * `problem` is null, "waiting", "denied" or "unsupported" (see `error`).
+ */
+export async function detectNativeCapabilities({ timeoutMs = 4000 } = {}) {
   const caps = {
     native: true,
     secureContext: true,
@@ -69,13 +100,20 @@ export async function detectNativeCapabilities() {
     getDevices: false,
     adapter: null,
     problem: null,
+    error: null,
   };
   try {
-    const ble = await ready();
-    caps.adapter = (await ble.isEnabled()).value;
+    await withTimeout(ready(), timeoutMs);
+    caps.adapter = (await withTimeout(ble.isEnabled(), timeoutMs)).value;
   } catch (error) {
-    caps.adapter = false;
-    caps.problem = /denied|unauthori/i.test(error?.message ?? '') ? 'denied' : 'unsupported';
+    if (error?.name === 'TimeoutError') {
+      caps.problem = 'waiting';
+    } else {
+      console.error('Bluetooth could not start:', error);
+      caps.adapter = false;
+      caps.error = error?.message ?? String(error);
+      caps.problem = /denied|unauthori/i.test(caps.error) ? 'denied' : 'unsupported';
+    }
   }
   return caps;
 }
@@ -98,9 +136,8 @@ export class NativeBluetoothSource extends EventTarget {
 
   async startScan() {
     if (this.isScanning) return;
-    let ble;
     try {
-      ble = await ready();
+      await ready();
     } catch (error) {
       if (/denied|unauthori/i.test(error?.message ?? '')) {
         throw nativeError('BT Finder is not allowed to use Bluetooth. Turn it on in Settings → Privacy & Security → Bluetooth.');
@@ -130,7 +167,7 @@ export class NativeBluetoothSource extends EventTarget {
   stopScan() {
     if (!this.isScanning) return;
     this.isScanning = false;
-    loadPlugin().then((ble) => ble.stopLEScan()).catch(() => {});
+    loadPlugin().then(() => ble.stopLEScan()).catch(() => {});
   }
 
   stop() {
